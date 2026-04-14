@@ -2,3 +2,7 @@ numpy>=1.26,<2
 pandas>=2.2,<3
 scikit-learn>=1.4
 matplotlib>=3.8
+pillow>=10.0
+torch>=2.0
+torchvision>=0.15
+xgboost>=2.0
