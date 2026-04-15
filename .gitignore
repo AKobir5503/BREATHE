@@ -28,5 +28,6 @@ results/
 *.png
 *.jpg
 data/
+chexbert_labels/
 
 
