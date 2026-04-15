@@ -7,14 +7,41 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from sklearn.model_selection import train_test_split
+
+try:
+    from xgboost import XGBClassifier
+except ImportError:  # pragma: no cover
+    XGBClassifier = None  # type: ignore[misc, assignment]
 
 
 SEVERE_LABELS = ["Pneumonia", "Edema", "Consolidation", "Pleural Effusion"]
 FEATURE_COLUMNS = ["age", "sex"]
 JOIN_KEY = "path_to_image"
+
+MODEL_ORDER = [
+    "logistic_regression",
+    "random_forest",
+    "gradient_boosting",
+    "xgboost",
+]
+
+MODEL_DISPLAY = {
+    "logistic_regression": "Logistic Regression",
+    "random_forest": "Random Forest",
+    "gradient_boosting": "Gradient Boosting",
+    "xgboost": "XGBoost",
+}
+
+# Keep legacy filenames for the original two models (slides/docs may reference them).
+CONFUSION_MATRIX_STEM = {
+    "logistic_regression": "demographics_confusion_matrix_logistic",
+    "random_forest": "demographics_confusion_matrix_random_forest",
+    "gradient_boosting": "demographics_confusion_matrix_gradient_boosting",
+    "xgboost": "demographics_confusion_matrix_xgboost",
+}
 
 
 def load_and_preprocess(csv_path: Path, labels_jsonl_path: Path) -> tuple[pd.DataFrame, pd.Series]:
@@ -50,25 +77,57 @@ def load_and_preprocess(csv_path: Path, labels_jsonl_path: Path) -> tuple[pd.Dat
 def evaluate_model(model, X_train, y_train, X_test, y_test) -> dict:
     model.fit(X_train, y_train)
     preds = model.predict(X_test)
-    return {
+    result = {
+        "status": "trained",
         "accuracy": float(accuracy_score(y_test, preds)),
         "f1": float(f1_score(y_test, preds)),
         "confusion_matrix": confusion_matrix(y_test, preds).tolist(),
+    }
+    if hasattr(model, "feature_importances_"):
+        result["feature_importance"] = {
+            feature: float(value)
+            for feature, value in zip(FEATURE_COLUMNS, model.feature_importances_)
+        }
+    return result
+
+
+def xgboost_result_unavailable(note: str) -> dict:
+    return {
+        "status": "unavailable",
+        "note": note,
+        "accuracy": None,
+        "f1": None,
+        "confusion_matrix": None,
     }
 
 
 def train_and_evaluate(X: pd.DataFrame, y: pd.Series) -> dict:
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
+        X, y, test_size=0.2, random_state=42, stratify=y
     )
 
     logistic = LogisticRegression(max_iter=1000)
     random_forest = RandomForestClassifier(
         n_estimators=300, random_state=42, class_weight="balanced"
     )
+    gradient_boosting = GradientBoostingClassifier(random_state=42)
 
     logistic_metrics = evaluate_model(logistic, X_train, y_train, X_test, y_test)
     rf_metrics = evaluate_model(random_forest, X_train, y_train, X_test, y_test)
+    gb_metrics = evaluate_model(gradient_boosting, X_train, y_train, X_test, y_test)
+
+    if XGBClassifier is None:
+        xgb_metrics = xgboost_result_unavailable("XGBoost not installed (pip install xgboost).")
+    else:
+        try:
+            xgb = XGBClassifier(
+                n_estimators=300,
+                random_state=42,
+                eval_metric="logloss",
+            )
+            xgb_metrics = evaluate_model(xgb, X_train, y_train, X_test, y_test)
+        except Exception as e:  # pragma: no cover
+            xgb_metrics = xgboost_result_unavailable(f"XGBoost error: {e}")
 
     return {
         "n_samples": int(len(y)),
@@ -79,15 +138,33 @@ def train_and_evaluate(X: pd.DataFrame, y: pd.Series) -> dict:
         "models": {
             "logistic_regression": logistic_metrics,
             "random_forest": rf_metrics,
+            "gradient_boosting": gb_metrics,
+            "xgboost": xgb_metrics,
         },
     }
 
 
-def save_metrics_and_plots(metrics: dict, output_dir: Path) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
+def best_model_by_f1(models: dict) -> tuple[str | None, float | None]:
+    best_key: str | None = None
+    best_f1: float | None = None
+    for key in MODEL_ORDER:
+        m = models[key]
+        if m.get("status") != "trained":
+            continue
+        f1 = m["f1"]
+        if best_f1 is None or f1 > best_f1:
+            best_f1 = f1
+            best_key = key
+    return best_key, best_f1
 
-    logistic = metrics["models"]["logistic_regression"]
-    random_forest = metrics["models"]["random_forest"]
+
+def save_metrics_and_plots(metrics: dict, output_dir: Path) -> None:
+    import json
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    models = metrics["models"]
+    logistic = models["logistic_regression"]
+    random_forest = models["random_forest"]
 
     txt_path = output_dir / "demographics_metrics.txt"
     with txt_path.open("w") as f:
@@ -97,16 +174,20 @@ def save_metrics_and_plots(metrics: dict, output_dir: Path) -> None:
         f.write("\nClass distribution (normalized):\n")
         for k, v in metrics["class_counts_normalized"].items():
             f.write(f"  Severe={k}: {v:.4f}\n")
-        f.write("\nLogistic Regression:\n")
-        f.write(f"  Accuracy: {logistic['accuracy']:.4f}\n")
-        f.write(f"  F1 Score: {logistic['f1']:.4f}\n")
-        f.write(f"  Confusion matrix [[TN, FP], [FN, TP]]: {logistic['confusion_matrix']}\n")
-        f.write("\nRandom Forest:\n")
-        f.write(f"  Accuracy: {random_forest['accuracy']:.4f}\n")
-        f.write(f"  F1 Score: {random_forest['f1']:.4f}\n")
-        f.write(
-            f"  Confusion matrix [[TN, FP], [FN, TP]]: {random_forest['confusion_matrix']}\n"
-        )
+
+        for key in MODEL_ORDER:
+            m = models[key]
+            title = MODEL_DISPLAY[key]
+            f.write(f"\n{title}:\n")
+            f.write(f"  Status: {m['status']}\n")
+            if m["status"] == "trained":
+                f.write(f"  Accuracy: {m['accuracy']:.4f}\n")
+                f.write(f"  F1 Score: {m['f1']:.4f}\n")
+                f.write(
+                    f"  Confusion matrix [[TN, FP], [FN, TP]]: {m['confusion_matrix']}\n"
+                )
+            else:
+                f.write(f"  Note: {m.get('note', '')}\n")
 
         acc_delta = random_forest["accuracy"] - logistic["accuracy"]
         f1_delta = random_forest["f1"] - logistic["f1"]
@@ -120,76 +201,172 @@ def save_metrics_and_plots(metrics: dict, output_dir: Path) -> None:
         else:
             f.write("  Note: Mixed result; no clear nonlinear gain.\n")
 
-    import json
+        best_key, best_f1 = best_model_by_f1(models)
+        f.write("\nBest model by F1 (among trained):\n")
+        if best_key is not None:
+            f.write(f"  {MODEL_DISPLAY[best_key]} ({best_key}): F1 = {best_f1:.4f}\n")
+        else:
+            f.write("  (none)\n")
 
     json_path = output_dir / "demographics_metrics.json"
     with json_path.open("w") as f:
         json.dump(metrics, f, indent=2)
 
-    comparison_df = pd.DataFrame(
-        [
-            {
-                "model": "logistic_regression",
-                "accuracy": logistic["accuracy"],
-                "f1": logistic["f1"],
-            },
-            {
-                "model": "random_forest",
-                "accuracy": random_forest["accuracy"],
-                "f1": random_forest["f1"],
-            },
-        ]
-    )
+    comparison_rows = []
+    for key in MODEL_ORDER:
+        m = models[key]
+        row = {
+            "model": key,
+            "status": m["status"],
+            "accuracy": m.get("accuracy"),
+            "f1": m.get("f1"),
+        }
+        if m["status"] != "trained":
+            row["note"] = m.get("note", "")
+        comparison_rows.append(row)
+    comparison_df = pd.DataFrame(comparison_rows)
     comparison_df.to_csv(output_dir / "tabular_comparison.csv", index=False)
 
-    cm = np.array(logistic["confusion_matrix"])
-    fig, ax = plt.subplots(figsize=(4, 4))
-    im = ax.imshow(cm, cmap="Blues")
-    ax.set_xticks([0, 1], ["Pred 0", "Pred 1"])
-    ax.set_yticks([0, 1], ["True 0", "True 1"])
-    for (i, j), v in np.ndenumerate(cm):
-        ax.text(j, i, str(v), ha="center", va="center")
-    fig.colorbar(im, ax=ax)
-    ax.set_title("Logistic Regression\nconfusion matrix")
-    plt.tight_layout()
-    fig.savefig(output_dir / "demographics_confusion_matrix_logistic.png")
-    plt.close(fig)
+    trained_models = [k for k in MODEL_ORDER if models[k]["status"] == "trained"]
+    best_acc = max((models[k]["accuracy"] for k in trained_models), default=None)
+    best_f1 = max((models[k]["f1"] for k in trained_models), default=None)
 
-    cm_rf = np.array(random_forest["confusion_matrix"])
-    fig, ax = plt.subplots(figsize=(4, 4))
-    im = ax.imshow(cm_rf, cmap="Greens")
-    ax.set_xticks([0, 1], ["Pred 0", "Pred 1"])
-    ax.set_yticks([0, 1], ["True 0", "True 1"])
-    for (i, j), v in np.ndenumerate(cm_rf):
-        ax.text(j, i, str(v), ha="center", va="center")
-    fig.colorbar(im, ax=ax)
-    ax.set_title("Random Forest\nconfusion matrix")
-    plt.tight_layout()
-    fig.savefig(output_dir / "demographics_confusion_matrix_random_forest.png")
-    plt.close(fig)
+    def fmt_markdown_score(value: float | None, best: float | None) -> str:
+        if value is None:
+            return "N/A"
+        formatted = f"{value:.4f}"
+        if best is not None and value == best:
+            return f"**{formatted}**"
+        return formatted
 
-    fig, ax = plt.subplots(figsize=(4, 4))
+    md_path = output_dir / "demographics_results_table.md"
+    with md_path.open("w") as f:
+        f.write("| Model | Status | Accuracy | F1 |\n")
+        f.write("|---|---|---:|---:|\n")
+        for key in MODEL_ORDER:
+            m = models[key]
+            f.write(
+                f"| {MODEL_DISPLAY[key]} | {m['status']} | "
+                f"{fmt_markdown_score(m.get('accuracy'), best_acc)} | "
+                f"{fmt_markdown_score(m.get('f1'), best_f1)} |\n"
+            )
+
+    cmap_by_model = {
+        "logistic_regression": "Blues",
+        "random_forest": "Greens",
+        "gradient_boosting": "Oranges",
+        "xgboost": "Purples",
+    }
+    for key in MODEL_ORDER:
+        m = models[key]
+        if m["status"] != "trained" or m["confusion_matrix"] is None:
+            continue
+        cm = np.array(m["confusion_matrix"])
+        fig, ax = plt.subplots(figsize=(4, 4))
+        im = ax.imshow(cm, cmap=cmap_by_model[key])
+        ax.set_xticks([0, 1], ["Pred 0", "Pred 1"])
+        ax.set_yticks([0, 1], ["True 0", "True 1"])
+        for (i, j), v in np.ndenumerate(cm):
+            ax.text(j, i, str(v), ha="center", va="center")
+        fig.colorbar(im, ax=ax)
+        ax.set_title(f"{MODEL_DISPLAY[key]}\nconfusion matrix")
+        plt.tight_layout()
+        fig.savefig(output_dir / f"{CONFUSION_MATRIX_STEM[key]}.png")
+        plt.close(fig)
+
+    best_key, _ = best_model_by_f1(models)
+    if best_key is not None and models[best_key]["confusion_matrix"] is not None:
+        cm_best = np.array(models[best_key]["confusion_matrix"])
+        fig, ax = plt.subplots(figsize=(4, 4))
+        im = ax.imshow(cm_best, cmap="BuGn")
+        ax.set_xticks([0, 1], ["Pred 0", "Pred 1"])
+        ax.set_yticks([0, 1], ["True 0", "True 1"])
+        for (i, j), v in np.ndenumerate(cm_best):
+            ax.text(j, i, str(v), ha="center", va="center")
+        fig.colorbar(im, ax=ax)
+        ax.set_title(f"Best model: {MODEL_DISPLAY[best_key]}\nconfusion matrix")
+        plt.tight_layout()
+        fig.savefig(output_dir / "demographics_confusion_matrix_best_model.png")
+        plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
     x = np.arange(2)
-    width = 0.35
-    ax.bar(
-        x - width / 2,
-        [logistic["accuracy"], logistic["f1"]],
-        width,
-        label="Logistic",
-    )
-    ax.bar(
-        x + width / 2,
-        [random_forest["accuracy"], random_forest["f1"]],
-        width,
-        label="Random Forest",
-    )
+    n = len(trained_models)
+    width = min(0.8 / n, 0.22) if n else 0.35
+    offsets = (np.arange(n) - (n - 1) / 2) * width
+    for i, key in enumerate(trained_models):
+        m = models[key]
+        ax.bar(
+            x + offsets[i],
+            [m["accuracy"], m["f1"]],
+            width,
+            label=MODEL_DISPLAY[key],
+        )
+    if best_key is not None:
+        best_f1 = models[best_key]["f1"]
+        ax.text(
+            1,
+            best_f1 + 0.02,
+            f"Winner: {MODEL_DISPLAY[best_key]}",
+            ha="center",
+            fontsize=9,
+            fontweight="bold",
+        )
     ax.set_xticks(x, ["Accuracy", "F1"])
     ax.set_ylim(0, 1)
-    ax.legend()
+    ax.legend(fontsize=8)
     ax.set_title("Demographics models\naccuracy and F1")
     plt.tight_layout()
     fig.savefig(output_dir / "demographics_accuracy_f1.png")
     plt.close(fig)
+
+    tree_models = ["random_forest", "gradient_boosting", "xgboost"]
+    tree_with_importance = [
+        key
+        for key in tree_models
+        if models[key]["status"] == "trained" and "feature_importance" in models[key]
+    ]
+    if tree_with_importance:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        x = np.arange(len(FEATURE_COLUMNS))
+        n = len(tree_with_importance)
+        width = min(0.8 / n, 0.22)
+        offsets = (np.arange(n) - (n - 1) / 2) * width
+        for i, key in enumerate(tree_with_importance):
+            importances = [models[key]["feature_importance"][f] for f in FEATURE_COLUMNS]
+            ax.bar(x + offsets[i], importances, width, label=MODEL_DISPLAY[key])
+        ax.set_xticks(x, [c.capitalize() for c in FEATURE_COLUMNS])
+        ax.set_ylim(0, 1)
+        ax.set_ylabel("Importance")
+        ax.set_title("Tree model feature importance\nAge vs Sex")
+        ax.legend(fontsize=8)
+        plt.tight_layout()
+        fig.savefig(output_dir / "demographics_feature_importance_tree_models.png")
+        plt.close(fig)
+
+    dominant_feature = "age"
+    if tree_with_importance:
+        avg = {
+            feature: float(
+                np.mean(
+                    [models[k]["feature_importance"][feature] for k in tree_with_importance]
+                )
+            )
+            for feature in FEATURE_COLUMNS
+        }
+        dominant_feature = max(avg, key=avg.get)
+    ensemble_improves = any(
+        models[k]["status"] == "trained" and models[k]["f1"] > logistic["f1"]
+        for k in tree_models
+        if k in models
+    )
+    verb = "outperform" if ensemble_improves else "do not outperform"
+    takeaway = (
+        f"Ensemble methods {verb} logistic baseline; "
+        f"{dominant_feature} contributes most predictive signal."
+    )
+    with (output_dir / "demographics_takeaway.txt").open("w") as f:
+        f.write(takeaway + "\n")
 
 
 def main() -> None:
@@ -232,17 +409,39 @@ def main() -> None:
     print(y.value_counts(normalize=True))
 
     metrics = train_and_evaluate(X, y)
+    models = metrics["models"]
 
-    logistic = metrics["models"]["logistic_regression"]
-    random_forest = metrics["models"]["random_forest"]
+    logistic = models["logistic_regression"]
+    random_forest = models["random_forest"]
 
-    print("\nLogistic Regression")
+    print("\n--- Model summary ---")
+    for key in MODEL_ORDER:
+        m = models[key]
+        label = MODEL_DISPLAY[key]
+        if m["status"] == "trained":
+            print(
+                f"{label}: Accuracy={m['accuracy']:.4f}, F1={m['f1']:.4f}, "
+                f"status=trained"
+            )
+        else:
+            print(f"{label}: unavailable — {m.get('note', '')}")
+
+    best_key, best_f1 = best_model_by_f1(models)
+    if best_key is not None:
+        print(
+            f"\nBest model by F1: {MODEL_DISPLAY[best_key]} "
+            f"(F1={best_f1:.4f})"
+        )
+    else:
+        print("\nBest model by F1: (no trained models)")
+
+    print("\n--- Details: Logistic Regression ---")
     print("Accuracy:", logistic["accuracy"])
     print("F1 Score:", logistic["f1"])
     print("Confusion matrix [[TN, FP], [FN, TP]]:")
     print(np.array(logistic["confusion_matrix"]))
 
-    print("\nRandom Forest")
+    print("\n--- Details: Random Forest ---")
     print("Accuracy:", random_forest["accuracy"])
     print("F1 Score:", random_forest["f1"])
     print("Confusion matrix [[TN, FP], [FN, TP]]:")
