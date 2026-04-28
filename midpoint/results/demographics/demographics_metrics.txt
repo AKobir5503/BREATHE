@@ -1,0 +1,39 @@
+Class distribution (counts):
+  Severe=1: 104
+  Severe=0: 57
+
+Class distribution (normalized):
+  Severe=1: 0.6460
+  Severe=0: 0.3540
+
+Logistic Regression:
+  Status: trained
+  Accuracy: 0.6364
+  F1 Score: 0.7391
+  Confusion matrix [[TN, FP], [FN, TP]]: [[4, 8], [4, 17]]
+
+Random Forest:
+  Status: trained
+  Accuracy: 0.7576
+  F1 Score: 0.7778
+  Confusion matrix [[TN, FP], [FN, TP]]: [[11, 1], [7, 14]]
+
+Gradient Boosting:
+  Status: trained
+  Accuracy: 0.7576
+  F1 Score: 0.8000
+  Confusion matrix [[TN, FP], [FN, TP]]: [[9, 3], [5, 16]]
+
+XGBoost:
+  Status: trained
+  Accuracy: 0.7879
+  F1 Score: 0.8205
+  Confusion matrix [[TN, FP], [FN, TP]]: [[10, 2], [5, 16]]
+
+Comparison (RF - Logistic):
+  Accuracy delta: +0.1212
+  F1 delta: +0.0386
+  Note: Nonlinear model shows some improvement.
+
+Best model by F1 (among trained):
+  XGBoost (xgboost): F1 = 0.8205
