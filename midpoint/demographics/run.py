@@ -67,21 +67,45 @@ def load_and_preprocess(csv_path: Path, labels_jsonl_path: Path) -> tuple[pd.Dat
 
     merged["Severe"] = (merged[SEVERE_LABELS].sum(axis=1) > 0).astype(int)
 
-    merged["sex"] = (merged["sex"] == "Male").astype(int)
+    # Normalize dtypes so all models (especially XGBoost) receive numeric input.
+    merged["age"] = pd.to_numeric(merged["age"], errors="coerce")
+    merged["sex"] = (
+        merged["sex"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .map({"male": 1, "female": 0})
+    )
+    merged = merged.dropna(subset=FEATURE_COLUMNS)
+    merged["age"] = merged["age"].astype(float)
+    merged["sex"] = merged["sex"].astype(int)
 
     X = merged[FEATURE_COLUMNS].copy()
     y = merged["Severe"].copy()
     return X, y
 
 
-def evaluate_model(model, X_train, y_train, X_test, y_test) -> dict:
-    model.fit(X_train, y_train)
-    preds = model.predict(X_test)
+def evaluate_model(
+    model,
+    X_train,
+    y_train,
+    X_test,
+    y_test,
+    *,
+    as_numpy: bool = False,
+) -> dict:
+    X_train_in = X_train.to_numpy(dtype=np.float32) if as_numpy else X_train
+    X_test_in = X_test.to_numpy(dtype=np.float32) if as_numpy else X_test
+    y_train_in = y_train.to_numpy(dtype=np.int32) if as_numpy else y_train
+    y_test_in = y_test.to_numpy(dtype=np.int32) if as_numpy else y_test
+
+    model.fit(X_train_in, y_train_in)
+    preds = model.predict(X_test_in)
     result = {
         "status": "trained",
-        "accuracy": float(accuracy_score(y_test, preds)),
-        "f1": float(f1_score(y_test, preds)),
-        "confusion_matrix": confusion_matrix(y_test, preds).tolist(),
+        "accuracy": float(accuracy_score(y_test_in, preds)),
+        "f1": float(f1_score(y_test_in, preds)),
+        "confusion_matrix": confusion_matrix(y_test_in, preds).tolist(),
     }
     if hasattr(model, "feature_importances_"):
         result["feature_importance"] = {
@@ -121,11 +145,26 @@ def train_and_evaluate(X: pd.DataFrame, y: pd.Series) -> dict:
     else:
         try:
             xgb = XGBClassifier(
-                n_estimators=300,
+                objective="binary:logistic",
+                n_estimators=500,
+                learning_rate=0.05,
+                max_depth=3,
+                subsample=0.9,
+                colsample_bytree=0.9,
+                reg_lambda=1.0,
+                tree_method="hist",
+                n_jobs=-1,
                 random_state=42,
                 eval_metric="logloss",
             )
-            xgb_metrics = evaluate_model(xgb, X_train, y_train, X_test, y_test)
+            xgb_metrics = evaluate_model(
+                xgb,
+                X_train,
+                y_train,
+                X_test,
+                y_test,
+                as_numpy=True,
+            )
         except Exception as e:  # pragma: no cover
             xgb_metrics = xgboost_result_unavailable(f"XGBoost error: {e}")
 
