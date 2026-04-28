@@ -9,13 +9,25 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import (
+    ConfusionMatrixDisplay,
+    RocCurveDisplay,
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from sklearn.model_selection import (
     GridSearchCV,
     StratifiedKFold,
     cross_validate,
     train_test_split,
 )
+from sklearn.neural_network import MLPClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 SEVERE_LABELS = ["Pneumonia", "Edema", "Consolidation", "Pleural Effusion"]
 TABULAR_FEATURES = ["age", "sex"]
@@ -23,6 +35,11 @@ JOIN_KEY = "path_to_image"
 
 CV_SPLITS = 5
 CV_RANDOM_STATE = 42
+LABEL_DEFINITION = (
+    "Positive class (1) = High-Risk Respiratory Condition: at least one of "
+    "Pneumonia, Edema, Consolidation, Pleural Effusion present. "
+    "Negative class (0) = Lower-Risk Condition: none present."
+)
 
 
 def load_demographics_and_labels_with_stats(
@@ -124,10 +141,20 @@ def _load_embeddings(embeddings_path: Path) -> pd.DataFrame:
 def _train_model(model, X_train, y_train, X_test, y_test) -> dict:
     model.fit(X_train, y_train)
     preds = model.predict(X_test)
-    return {
+    out = {
         "accuracy": float(accuracy_score(y_test, preds)),
         "f1": float(f1_score(y_test, preds)),
+        "precision": float(precision_score(y_test, preds, zero_division=0)),
+        "recall": float(recall_score(y_test, preds, zero_division=0)),
+        "confusion_matrix": confusion_matrix(y_test, preds).tolist(),
     }
+    if hasattr(model, "predict_proba"):
+        try:
+            probs = model.predict_proba(X_test)[:, 1]
+            out["roc_auc"] = float(roc_auc_score(y_test, probs))
+        except Exception:
+            out["roc_auc"] = None
+    return out
 
 
 def _serialize_rf_params(params: dict) -> dict:
@@ -450,22 +477,225 @@ def _save_importance_chart(importance_rows: list[dict], output_dir: Path) -> Non
     plt.close()
 
 
-def _train_multimodal(
-    merged: pd.DataFrame, embedding_cols: list[str], output: dict
-) -> dict:
-    X_tab = merged[TABULAR_FEATURES].copy()
-    X_emb = merged[embedding_cols].copy()
-    y = merged["Severe"].copy()
-    X_multi = pd.concat([X_emb, X_tab], axis=1)
+def _multimodal_search(
+    X_multi: pd.DataFrame, y: pd.Series, include_xgboost: bool
+) -> tuple[dict[str, dict], object | None, str | None]:
+    skf = StratifiedKFold(
+        n_splits=CV_SPLITS, shuffle=True, random_state=CV_RANDOM_STATE
+    )
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_multi, y, test_size=0.2, random_state=CV_RANDOM_STATE, stratify=y
-    )
-    clf = RandomForestClassifier(
-        n_estimators=300, random_state=CV_RANDOM_STATE, class_weight="balanced"
-    )
-    output["combined_random_forest"] = _train_model(clf, X_train, y_train, X_test, y_test)
-    return output
+    model_spaces: dict[str, tuple[object, dict]] = {
+        "logistic_regression": (
+            Pipeline(
+                [
+                    ("scaler", StandardScaler()),
+                    (
+                        "clf",
+                        LogisticRegression(
+                            max_iter=5000,
+                            random_state=CV_RANDOM_STATE,
+                            class_weight="balanced",
+                        ),
+                    ),
+                ]
+            ),
+            {"clf__C": [0.01, 0.1, 1.0, 10.0]},
+        ),
+        "gradient_boosting": (
+            GradientBoostingClassifier(random_state=CV_RANDOM_STATE),
+            {
+                "n_estimators": [100, 200],
+                "max_depth": [3, 5],
+                "learning_rate": [0.01, 0.1],
+            },
+        ),
+        "mlp": (
+            Pipeline(
+                [
+                    ("scaler", StandardScaler()),
+                    (
+                        "clf",
+                        MLPClassifier(
+                            random_state=CV_RANDOM_STATE,
+                            max_iter=500,
+                            early_stopping=True,
+                            validation_fraction=0.1,
+                            n_iter_no_change=15,
+                        ),
+                    ),
+                ]
+            ),
+            {
+                "clf__hidden_layer_sizes": [(128,), (256, 64)],
+                "clf__alpha": [1e-4, 1e-3],
+            },
+        ),
+    }
+
+    if include_xgboost:
+        try:
+            from xgboost import XGBClassifier
+
+            model_spaces["xgboost"] = (
+                XGBClassifier(
+                    random_state=CV_RANDOM_STATE,
+                    eval_metric="logloss",
+                    verbosity=0,
+                    n_jobs=-1,
+                ),
+                {
+                    "n_estimators": [100, 200],
+                    "max_depth": [3, 5],
+                    "learning_rate": [0.01, 0.1],
+                },
+            )
+        except Exception:
+            pass
+
+    out: dict[str, dict] = {}
+    best_name: str | None = None
+    best_estimator: object | None = None
+    best_f1 = -1.0
+    for model_name, (estimator, grid) in model_spaces.items():
+        try:
+            gs = GridSearchCV(
+                estimator=estimator,
+                param_grid=grid,
+                cv=skf,
+                scoring="f1",
+                refit=True,
+                n_jobs=-1,
+            )
+            gs.fit(X_multi, y)
+            acc_m, acc_s, f1_m, f1_s = _cv_mean_std(gs.best_estimator_, X_multi, y, skf)
+            out[model_name] = {
+                "best_params": _to_json_safe(gs.best_params_),
+                "accuracy_mean": acc_m,
+                "accuracy_std": acc_s,
+                "f1_mean": f1_m,
+                "f1_std": f1_s,
+                "grid_best_f1_cv": float(gs.best_score_),
+            }
+            if f1_m > best_f1:
+                best_f1 = f1_m
+                best_name = model_name
+                best_estimator = gs.best_estimator_
+        except Exception as exc:
+            note = str(exc).strip().splitlines()[0] if str(exc).strip() else exc.__class__.__name__
+            out[model_name] = {"status": "failed", "note": note}
+
+    if include_xgboost and "xgboost" not in out:
+        out["xgboost"] = {
+            "status": "wip",
+            "note": "XGBoost unavailable in environment (install xgboost and OpenMP).",
+        }
+    if not include_xgboost:
+        out["xgboost"] = {
+            "status": "wip",
+            "note": "XGBoost disabled. Re-run with --include-xgboost.",
+        }
+
+    return out, best_estimator, best_name
+
+
+def _plot_multimodal_diagnostics(
+    output_dir: Path,
+    best_name: str,
+    y_test: pd.Series,
+    preds: np.ndarray,
+    probs: np.ndarray | None,
+) -> None:
+    cm = confusion_matrix(y_test, preds)
+    fig, ax = plt.subplots(figsize=(4.2, 4.2))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm)
+    disp.plot(ax=ax, cmap="Purples", colorbar=False)
+    ax.set_title(f"Best multimodal model: {best_name}")
+    plt.tight_layout()
+    fig.savefig(output_dir / "multimodal_confusion_matrix_best.png", dpi=150)
+    plt.close(fig)
+
+    if probs is not None:
+        fig, ax = plt.subplots(figsize=(5, 4))
+        RocCurveDisplay.from_predictions(y_test, probs, ax=ax)
+        ax.set_title(f"Best multimodal model ROC: {best_name}")
+        plt.tight_layout()
+        fig.savefig(output_dir / "multimodal_roc_curve_best.png", dpi=150)
+        plt.close(fig)
+
+
+def _read_unimodal_metric(json_path: Path) -> dict | None:
+    if not json_path.exists():
+        return None
+    try:
+        with json_path.open("r") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+
+    if "models" in data:
+        best_key = None
+        best_f1 = -1.0
+        for k, v in data["models"].items():
+            if isinstance(v, dict) and "cv_f1_mean" in v and v["cv_f1_mean"] > best_f1:
+                best_f1 = float(v["cv_f1_mean"])
+                best_key = k
+        if best_key is None:
+            return None
+        best = data["models"][best_key]
+        return {
+            "name": f"imaging ({best_key})",
+            "accuracy": float(best.get("cv_accuracy_mean", np.nan)),
+            "f1": float(best.get("cv_f1_mean", np.nan)),
+        }
+
+    if "tabular_part2" in data and "models" in data["tabular_part2"]:
+        best_key = None
+        best_f1 = -1.0
+        for k, v in data["tabular_part2"]["models"].items():
+            if isinstance(v, dict) and "f1_mean" in v and v["f1_mean"] > best_f1:
+                best_f1 = float(v["f1_mean"])
+                best_key = k
+        if best_key is None:
+            return None
+        best = data["tabular_part2"]["models"][best_key]
+        return {
+            "name": f"tabular ({best_key})",
+            "accuracy": float(best.get("accuracy_mean", np.nan)),
+            "f1": float(best.get("f1_mean", np.nan)),
+        }
+    return None
+
+
+def _plot_unimodal_vs_multimodal(
+    output_dir: Path,
+    multimodal_acc: float,
+    multimodal_f1: float,
+    tabular_ref: dict | None,
+    imaging_ref: dict | None,
+) -> None:
+    rows = []
+    if tabular_ref is not None:
+        rows.append(tabular_ref)
+    if imaging_ref is not None:
+        rows.append(imaging_ref)
+    rows.append({"name": "multimodal (best)", "accuracy": multimodal_acc, "f1": multimodal_f1})
+
+    labels = [r["name"] for r in rows]
+    acc = [r["accuracy"] for r in rows]
+    f1 = [r["f1"] for r in rows]
+    x = np.arange(len(labels))
+    width = 0.34
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.bar(x - width / 2, acc, width, label="Accuracy")
+    ax.bar(x + width / 2, f1, width, label="F1")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=15, ha="right")
+    ax.set_ylim(0, 1.05)
+    ax.set_title("Unimodal baselines vs multimodal")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(output_dir / "multimodal_vs_unimodal_accuracy_f1.png", dpi=150)
+    plt.close(fig)
 
 
 def main() -> None:
@@ -498,6 +728,18 @@ def main() -> None:
         "--include-xgboost",
         action="store_true",
         help="Enable XGBoost training for tabular part 2 (optional; may require OpenMP setup).",
+    )
+    parser.add_argument(
+        "--tabular-metrics-json",
+        type=str,
+        default="midpoint/results/multimodal_metrics.json",
+        help="Optional JSON path for best tabular baseline metrics (for final comparison plot).",
+    )
+    parser.add_argument(
+        "--imaging-metrics-json",
+        type=str,
+        default="midpoint/results/imaging_metrics.json",
+        help="Optional JSON path for best imaging baseline metrics (for final comparison plot).",
     )
     args = parser.parse_args()
 
@@ -539,8 +781,9 @@ def main() -> None:
             "random_state": CV_RANDOM_STATE,
             "hyperparameter_tuning": "GridSearchCV optimizing F1 on each fold",
         },
+        "label_definition": LABEL_DEFINITION,
         "tabular_part2": {"models": tab_models},
-        "multimodal_early": {},
+        "multimodal_final": {},
     }
 
     _save_importance_chart(importance_rows, output_dir)
@@ -561,22 +804,66 @@ def main() -> None:
             if not embedding_cols:
                 embedding_cols = [c for c in emb_df.columns if c != JOIN_KEY]
             if len(combined) < 10:
-                report["multimodal_early"] = {
+                report["multimodal_final"] = {
                     "status": "wip",
                     "note": "Too few merged rows after joining embeddings for a reliable split.",
                     "n_merged_samples": int(len(combined)),
                 }
             else:
-                report["multimodal_early"] = _train_multimodal(
-                    combined, embedding_cols, {}
+                X_multi = combined[[*embedding_cols, *TABULAR_FEATURES]].copy()
+                y_multi = combined["Severe"].copy()
+                model_results, best_estimator, best_name = _multimodal_search(
+                    X_multi, y_multi, include_xgboost=args.include_xgboost
                 )
-                report["multimodal_early"]["status"] = "preliminary"
-                report["multimodal_early"]["n_merged_samples"] = int(len(combined))
+                report["multimodal_final"] = {
+                    "status": "complete" if best_estimator is not None else "wip",
+                    "n_merged_samples": int(len(combined)),
+                    "models": model_results,
+                    "best_model_by_cv_f1": best_name,
+                }
+                if best_estimator is not None and best_name is not None:
+                    X_train, X_test, y_train, y_test = train_test_split(
+                        X_multi,
+                        y_multi,
+                        test_size=0.2,
+                        random_state=CV_RANDOM_STATE,
+                        stratify=y_multi,
+                    )
+                    best_estimator.fit(X_train, y_train)
+                    preds = best_estimator.predict(X_test)
+                    probs = None
+                    if hasattr(best_estimator, "predict_proba"):
+                        try:
+                            probs = best_estimator.predict_proba(X_test)[:, 1]
+                        except Exception:
+                            probs = None
+                    holdout = _train_model(best_estimator, X_train, y_train, X_test, y_test)
+                    report["multimodal_final"]["holdout_metrics"] = holdout
+                    _plot_multimodal_diagnostics(
+                        output_dir=output_dir,
+                        best_name=best_name,
+                        y_test=y_test,
+                        preds=np.asarray(preds),
+                        probs=probs,
+                    )
     else:
-        report["multimodal_early"] = {
+        report["multimodal_final"] = {
             "status": "wip",
-            "note": "No --embeddings file provided. Skipping early multimodal run.",
+            "note": "No --embeddings file provided. Skipping multimodal run.",
         }
+
+    tabular_ref = _read_unimodal_metric(Path(args.tabular_metrics_json))
+    imaging_ref = _read_unimodal_metric(Path(args.imaging_metrics_json))
+    mf = report.get("multimodal_final", {})
+    hold = mf.get("holdout_metrics") if isinstance(mf, dict) else None
+    if isinstance(hold, dict) and "accuracy" in hold and "f1" in hold:
+        _plot_unimodal_vs_multimodal(
+            output_dir=output_dir,
+            multimodal_acc=float(hold["accuracy"]),
+            multimodal_f1=float(hold["f1"]),
+            tabular_ref=tabular_ref,
+            imaging_ref=imaging_ref,
+        )
 
     report_path = output_dir / "multimodal_metrics.json"
     with report_path.open("w") as f:
@@ -616,14 +903,33 @@ def main() -> None:
             else:
                 f.write(f"  {metrics}\n")
 
-        f.write("\n=== Early Multimodal ===\n")
-        multi = report["multimodal_early"]
-        if "combined_random_forest" in multi:
-            f.write(
-                f"combined_random_forest Accuracy: {multi['combined_random_forest']['accuracy']:.4f}\n"
-            )
-            f.write(f"combined_random_forest F1: {multi['combined_random_forest']['f1']:.4f}\n")
-            f.write(f"Status: {multi.get('status', 'preliminary')}\n")
+        f.write("\n=== Final Multimodal (Embeddings + Age/Sex) ===\n")
+        multi = report["multimodal_final"]
+        if "models" in multi and "best_model_by_cv_f1" in multi:
+            f.write(f"Status: {multi.get('status', 'complete')}\n")
+            f.write(f"Merged multimodal rows: {multi.get('n_merged_samples', 0)}\n")
+            f.write(f"Best model by mean CV F1: {multi.get('best_model_by_cv_f1')}\n")
+            f.write("\nPer-model CV metrics (mean ± std):\n")
+            for model_name, metrics in multi["models"].items():
+                f.write(f"  {model_name}:\n")
+                if isinstance(metrics, dict) and "f1_mean" in metrics:
+                    f.write(f"    Best params: {metrics.get('best_params', {})}\n")
+                    f.write(f"    F1: {metrics['f1_mean']:.4f} ± {metrics['f1_std']:.4f}\n")
+                    f.write(
+                        f"    Accuracy: {metrics['accuracy_mean']:.4f} ± {metrics['accuracy_std']:.4f}\n"
+                    )
+                else:
+                    f.write(f"    {metrics}\n")
+            holdout = multi.get("holdout_metrics", {})
+            if isinstance(holdout, dict) and "f1" in holdout:
+                f.write("\nBest-model hold-out metrics (80/20 stratified):\n")
+                f.write(f"  Accuracy: {holdout['accuracy']:.4f}\n")
+                f.write(f"  F1: {holdout['f1']:.4f}\n")
+                f.write(f"  Precision: {holdout['precision']:.4f}\n")
+                f.write(f"  Recall: {holdout['recall']:.4f}\n")
+                if holdout.get("roc_auc") is not None:
+                    f.write(f"  ROC-AUC: {holdout['roc_auc']:.4f}\n")
+                f.write(f"  Confusion matrix: {holdout['confusion_matrix']}\n")
         else:
             f.write(f"Status: {multi.get('status', 'wip')}\n")
             f.write(f"Note: {multi.get('note', 'No details')}\n")
@@ -632,6 +938,9 @@ def main() -> None:
         f.write("- tabular_age_sex_scatter_by_severity.png\n")
         f.write("- tabular_logistic_decision_boundary_age_sex.png\n")
         f.write("- tabular_feature_importance.png / tabular_feature_importance.csv\n")
+        f.write("- multimodal_confusion_matrix_best.png\n")
+        f.write("- multimodal_roc_curve_best.png (if probability output available)\n")
+        f.write("- multimodal_vs_unimodal_accuracy_f1.png\n")
 
     print(f"Wrote report: {report_path}")
     print(f"Wrote text summary: {output_dir / 'multimodal_metrics.txt'}")
