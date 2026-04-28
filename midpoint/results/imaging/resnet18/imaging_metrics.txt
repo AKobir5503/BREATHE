@@ -1,0 +1,49 @@
+=== Imaging Models (Image-only) ===
+Extractor: resnet18
+Label definition: Positive class (1) = High-Risk Respiratory Condition: CheXbert-derived presence of any of Pneumonia, Edema, Consolidation, or Pleural Effusion (uncertain -1 labels dropped). Negative class (0) = Lower-Risk Condition (none of the above).
+N samples used: 161
+Skipped / unmatched for NPZ or missing files: 0
+CV folds: 5
+Final hold-out train size: 128
+Final hold-out test size: 33
+Best model (by mean CV F1): xgboost
+
+--- Per-model stratified CV (mean +/- std) ---
+logistic_regression:
+  CV Accuracy: 0.7951 +/- 0.0505
+  CV F1: 0.8373 +/- 0.0334
+  CV Precision: 0.8738 +/- 0.0738
+  CV Recall: 0.8076 +/- 0.0304
+  CV ROC-AUC: 0.8332 +/- 0.0766
+
+svm:
+  CV Accuracy: 0.8011 +/- 0.0899
+  CV F1: 0.8424 +/- 0.0679
+  CV Precision: 0.8727 +/- 0.0785
+  CV Recall: 0.8186 +/- 0.0812
+  CV ROC-AUC: 0.8812 +/- 0.0806
+
+mlp:
+  CV Accuracy: 0.7758 +/- 0.0834
+  CV F1: 0.8364 +/- 0.0526
+  CV Precision: 0.8142 +/- 0.0924
+  CV Recall: 0.8657 +/- 0.0347
+  CV ROC-AUC: 0.8433 +/- 0.0771
+
+xgboost:
+  CV Accuracy: 0.8068 +/- 0.0704
+  CV F1: 0.8586 +/- 0.0506
+  CV Precision: 0.8189 +/- 0.0514
+  CV Recall: 0.9048 +/- 0.0673
+  CV ROC-AUC: 0.8905 +/- 0.0626
+
+--- Final stratified hold-out (80/20, seed=42) for best CV model ---
+  Accuracy: 0.8485
+  F1: 0.8837
+  Precision: 0.8636
+  Recall: 0.9048
+  ROC AUC: 0.9008
+  Confusion matrix: [[9, 3], [2, 19]]
+
+Analysis note:
+Imaging captures pathology-relevant spatial patterns (e.g., consolidation, effusion, edema) that are not encoded in age/sex alone. Frozen pretrained CNN embeddings provide a strong off-the-shelf image representation; performance can still be limited by subset size, proxy labels derived from reports, lack of fine-tuning, and class imbalance.

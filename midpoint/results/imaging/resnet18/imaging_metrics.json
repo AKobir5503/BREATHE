@@ -1,0 +1,90 @@
+{
+  "n_samples": 161,
+  "train_size_final_split": 128,
+  "test_size_final_split": 33,
+  "class_counts": {
+    "1": 104,
+    "0": 57
+  },
+  "class_distribution": {
+    "1": 0.6459627329192547,
+    "0": 0.35403726708074534
+  },
+  "label_definition": "Positive class (1) = High-Risk Respiratory Condition: CheXbert-derived presence of any of Pneumonia, Edema, Consolidation, or Pleural Effusion (uncertain -1 labels dropped). Negative class (0) = Lower-Risk Condition (none of the above).",
+  "cv_splits": 5,
+  "models": {
+    "logistic_regression": {
+      "cv_accuracy_mean": 0.7950757575757577,
+      "cv_accuracy_std": 0.050517438505973115,
+      "cv_f1_mean": 0.8373021067292197,
+      "cv_f1_std": 0.03338636512514263,
+      "cv_precision_mean": 0.8737518037518036,
+      "cv_precision_std": 0.07377492739409496,
+      "cv_recall_mean": 0.8076190476190476,
+      "cv_recall_std": 0.03035690942954138,
+      "cv_roc_auc_mean": 0.8332034632034631,
+      "cv_roc_auc_std": 0.07657366254785865,
+      "selected_for_final_plots": false
+    },
+    "svm": {
+      "cv_accuracy_mean": 0.8011363636363636,
+      "cv_accuracy_std": 0.08989131982658441,
+      "cv_f1_mean": 0.8424224171207483,
+      "cv_f1_std": 0.06790685556616216,
+      "cv_precision_mean": 0.8727280477408355,
+      "cv_precision_std": 0.07848587935119287,
+      "cv_recall_mean": 0.8185714285714285,
+      "cv_recall_std": 0.08115381102008641,
+      "cv_roc_auc_mean": 0.8812337662337661,
+      "cv_roc_auc_std": 0.08056187498193741,
+      "selected_for_final_plots": false
+    },
+    "mlp": {
+      "cv_accuracy_mean": 0.7757575757575758,
+      "cv_accuracy_std": 0.08337077326994764,
+      "cv_f1_mean": 0.8363634016737302,
+      "cv_f1_std": 0.05263066935913509,
+      "cv_precision_mean": 0.814172984909827,
+      "cv_precision_std": 0.09235776640700162,
+      "cv_recall_mean": 0.8657142857142857,
+      "cv_recall_std": 0.03465410552125763,
+      "cv_roc_auc_mean": 0.8432792207792208,
+      "cv_roc_auc_std": 0.07714153620219652,
+      "selected_for_final_plots": false
+    },
+    "xgboost": {
+      "cv_accuracy_mean": 0.8068181818181819,
+      "cv_accuracy_std": 0.07041787902195303,
+      "cv_f1_mean": 0.8586232102915622,
+      "cv_f1_std": 0.05055640905407409,
+      "cv_precision_mean": 0.8189113495200451,
+      "cv_precision_std": 0.05141381578682923,
+      "cv_recall_mean": 0.9047619047619048,
+      "cv_recall_std": 0.06734350297014738,
+      "cv_roc_auc_mean": 0.8904689754689755,
+      "cv_roc_auc_std": 0.06263380301857008,
+      "selected_for_final_plots": true
+    }
+  },
+  "best_model_for_plots": "xgboost",
+  "final_holdout_metrics": {
+    "accuracy": 0.8484848484848485,
+    "f1": 0.8837209302325582,
+    "precision": 0.8636363636363636,
+    "recall": 0.9047619047619048,
+    "confusion_matrix": [
+      [
+        9,
+        3
+      ],
+      [
+        2,
+        19
+      ]
+    ],
+    "roc_auc": 0.9007936507936508
+  },
+  "extractor": "resnet18",
+  "skipped_missing_images": 0,
+  "imaging_vs_demographics_summary": "Imaging captures pathology-relevant spatial patterns (e.g., consolidation, effusion, edema) that are not encoded in age/sex alone. Frozen pretrained CNN embeddings provide a strong off-the-shelf image representation; performance can still be limited by subset size, proxy labels derived from reports, lack of fine-tuning, and class imbalance."
+}
