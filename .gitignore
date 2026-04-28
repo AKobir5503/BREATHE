@@ -14,6 +14,7 @@ venv/
 # Data / outputs
 outputs/
 results/
+.DS_Store
 
 # LaTeX
 *.aux

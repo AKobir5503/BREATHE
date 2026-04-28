@@ -35,15 +35,34 @@ This repo contains our midpoint experiments on **CheXpert+**: tabular models tha
    python midpoint/imaging/run.py \
      --csv data/df_chexpert_plus_240401.csv \
      --labels-jsonl data/chexbert_labels/impression_fixed.json \
-     --extractor resnet18 \
-     --output-dir midpoint/results/imaging
+     --extractor densenet121 \
+     --output-dir midpoint/results/imaging/densenet121 \
+     --include-xgboost
    ```
 
    Notes:
-   - Use `--extractor densenet121` to switch backbones.
+   - Backbones: `resnet18`, `densenet121`, or `efficientnet_b0`.
+   - **5-fold stratified CV** reports mean ± std for accuracy, F1, precision, recall, ROC-AUC; the **best CV F1** model is refit on an **80/20 hold-out** for confusion matrix + ROC plots.
    - If `path_to_image` values in your CSV are relative, add `--image-root /abs/path/to/images`.
-   - Add `--max-samples 200` for a quick smoke run.
-   - XGBoost is optional and disabled by default; enable with `--include-xgboost`.
+   - Add `--max-samples 200` for a quick smoke run (caps label rows before resolving images).
+   - **Reuse embeddings** (skip re-extraction if NPZ already exists in the same output dir): `--reuse-embeddings`, or pass an explicit file with `--embeddings-npz /path/to.npz`.
+   - **Append a comparison row** after each backbone run: `--comparison-csv midpoint/results/imaging/imaging_architecture_comparison.csv`
+   - XGBoost is optional; enable with `--include-xgboost` (on macOS you may need `brew install libomp`).
+
+   **Merge several runs into one table + figure** (after you have one `imaging_metrics.json` per directory):
+
+   ```bash
+   python midpoint/imaging/merge_summaries.py \
+     --dirs midpoint/results/imaging/resnet18 midpoint/results/imaging/densenet121 midpoint/results/imaging/efficientnet_b0 \
+     --output-csv midpoint/results/imaging/imaging_architecture_comparison.csv \
+     --output-plot midpoint/results/imaging/imaging_cv_f1_by_extractor.png
+   ```
+
+   **Unit test (no CheXpert+ download)**:
+
+   ```bash
+   pytest tests/test_imaging_eval.py -q
+   ```
 
 5. **Run tabular Part 2 + early multimodal model**:
 
@@ -89,14 +108,18 @@ Outputs include accuracy, F1, confusion matrices, and a short RF vs logistic com
 ### Imaging (`midpoint/imaging/run.py`)
 
 Pipeline:
-- Frozen pretrained feature extractor (`resnet18` or `densenet121`)
-- Embedding classifiers: Logistic Regression, MLP, optional XGBoost
+- Frozen pretrained feature extractor (`resnet18`, `densenet121`, or `efficientnet_b0`)
+- Embedding classifiers: **Logistic Regression** (scaled), **SVM RBF** (scaled), **MLP** (scaled), optional **XGBoost** (unscaled)
+- **Stratified k-fold CV** (default 5) on embeddings; best classifier by **mean CV F1** is evaluated on a stratified **80/20 hold-out** for final plots
 
 Outputs include:
-- Image-only accuracy/F1 (plus ROC AUC when available)
-- Confusion matrix and ROC plot
+- Per-model **CV** mean ± std: accuracy, F1, precision, recall, ROC-AUC
+- Final hold-out metrics for the best CV model (accuracy, F1, precision, recall, ROC-AUC, confusion matrix)
+- Confusion matrix and ROC plot (hold-out)
+- `imaging_cv_f1_by_classifier.png` — bar chart of CV F1 by classifier
 - Saved embeddings (`imaging_embeddings_<extractor>.npz`)
-- Brief rationale for why imaging captures richer pathology than demographics alone
+- Label definition text in metrics JSON/TXT (high-risk respiratory condition proxy from CheXbert)
+- Brief analysis note on limitations (subset size, proxy labels, frozen features)
 
 ### Tabular Part 2 + Multimodal (`midpoint/multimodal/run.py`)
 
@@ -133,15 +156,16 @@ After successful runs, look in **`midpoint/results/`**:
 | `demographics_confusion_matrix_logistic.png` | Confusion matrix for logistic |
 | `demographics_confusion_matrix_random_forest.png` | Confusion matrix for random forest |
 
-From imaging (`midpoint/results/imaging/`):
+From imaging (`midpoint/results/imaging/...`):
 
 | File | What it is |
 |------|------------|
-| `imaging_metrics.txt` | Human-readable image-only metrics |
+| `imaging_metrics.txt` | Human-readable image-only metrics (CV + hold-out) |
 | `imaging_metrics.json` | Same content in JSON |
-| `imaging_confusion_matrix.png` | Confusion matrix for best image-only model |
-| `imaging_roc_curve.png` | ROC curve for best model (if probabilities available) |
-| `imaging_embeddings_resnet18.npz` | Saved embeddings keyed by `path_to_image` |
+| `imaging_cv_f1_by_classifier.png` | Bar chart of mean CV F1 (± std) per classifier |
+| `imaging_confusion_matrix.png` | Confusion matrix for best CV model (hold-out) |
+| `imaging_roc_curve.png` | ROC curve for best model (hold-out, if probabilities available) |
+| `imaging_embeddings_<extractor>.npz` | Saved embeddings keyed by `path_to_image` |
 
 From multimodal (`midpoint/results/multimodal/`):
 
@@ -157,5 +181,6 @@ From multimodal (`midpoint/results/multimodal/`):
 ## Project layout (midpoint)
 
 - `midpoint/demographics/run.py` — tabular pipeline (this README)
-- `midpoint/imaging/run.py` — imaging pipeline (frozen CNN embeddings + classifiers)
+- `midpoint/imaging/run.py` — imaging pipeline (frozen CNN embeddings + classifiers + CV)
+- `midpoint/imaging/merge_summaries.py` — merge multiple `imaging_metrics.json` into one comparison CSV/plot
 - `midpoint/multimodal/run.py` — tabular Part 2 + early multimodal pipeline
